@@ -1,0 +1,50 @@
+{
+	"$schema": "./node_modules/@emdash-cms/plugin-cli/schemas/emdash-plugin.schema.json",
+
+	"slug": "emdash-stripe",
+	"publisher": "did:plc:bejyxkxwvbgbbuzmpqk5wmbg", // jameswelbes.bsky.social
+
+	"license": "MIT",
+	"author": { "name": "James Welbes", "url": "https://jameswelbes.com" },
+	"security": { "email": "james.welbes@gmail.com" },
+	"repo": "https://github.com/welbinator/emdash-stripe",
+
+	"description": "Stripe-powered ecommerce for EmDash: checkout sessions, order tracking, and email receipts.",
+
+	// Trust contract — what runtime APIs the plugin asks for.
+	// Changing these between releases requires a version bump because
+	// installed users have consented to the old contract.
+	"capabilities": ["content:read", "schema:read", "network:request", "email:send"],
+	"allowedHosts": ["api.stripe.com"],
+
+	// Plugin-owned order storage — separate from the site's CMS content.
+	"storage": {
+		"orders": {
+			"indexes": [
+				"stripeSessionId",
+				"status",
+				"createdAt",
+				"customerEmail",
+				["status", "createdAt"]
+			],
+			"uniqueIndexes": ["stripeSessionId"]
+		}
+	},
+
+	// Admin panel navigation + settings encryption hints.
+	"admin": {
+		"pages": [
+			{ "path": "/orders", "label": "Orders", "icon": "shopping-cart" },
+			{ "path": "/settings", "label": "Settings", "icon": "settings" }
+		],
+		"settingsSchema": {
+			"stripeSecretKey":    { "type": "secret", "label": "Stripe Secret Key" },
+			"stripeWebhookSecret": { "type": "secret", "label": "Stripe Webhook Secret" },
+			"productCollection":  { "type": "string", "label": "Product Collection Slug" },
+			"priceField":         { "type": "string", "label": "Price Field Name" },
+			"currencyCode":       { "type": "string", "label": "Currency Code" },
+			"successUrl":         { "type": "string", "label": "Success Page URL" },
+			"cancelUrl":          { "type": "string", "label": "Cancel Page URL" }
+		}
+	}
+}
