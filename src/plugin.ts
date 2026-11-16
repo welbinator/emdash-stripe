@@ -461,34 +461,19 @@ const plugin: SandboxedPlugin = {
     // -----------------------------------------------------------------------
     // POST /_emdash/api/plugins/emdash-stripe/webhook  (public)
     //
-    // Receives Stripe events. Applies a lightweight timestamp replay-guard.
-    // TODO: upgrade to full HMAC-SHA256 body verification once EmDash exposes
-    // a raw/text body mode in the sandbox (currently only parsed JSON input).
+    // Security: we do NOT trust the webhook body. When a checkout.session.completed
+    // event arrives we re-fetch the session from Stripe using our secret key and
+    // verify payment_status, amount, and currency before marking the order paid.
+    // This defeats forged webhooks regardless of signature state.
     // -----------------------------------------------------------------------
     webhook: {
       public: true,
       methods: ["POST"],
       handler: async (routeCtx, ctx) => {
-        const webhookSecret = await ctx.settings.get<string>("stripeWebhookSecret");
-        const sigHeader = routeCtx.request.headers["stripe-signature"] ?? "";
-
-        if (sigHeader) {
-          const parts = Object.fromEntries(
-            sigHeader.split(",").flatMap((part: string) => {
-              const eqIdx = part.indexOf("=");
-              if (eqIdx === -1) return [];
-              return [[part.slice(0, eqIdx), part.slice(eqIdx + 1)]];
-            }),
-          );
-          const timestamp = parseInt(parts["t"] ?? "0", 10);
-          const ageSeconds = Math.floor(Date.now() / 1000) - timestamp;
-          if (ageSeconds > 300 || ageSeconds < -60) {
-            ctx.log.warn("Webhook: timestamp outside tolerance", { ageSeconds });
-            return { received: false, error: "TIMESTAMP_OUTSIDE_TOLERANCE" };
-          }
-        } else if (webhookSecret) {
-          ctx.log.warn("Webhook: missing stripe-signature header");
-          return { received: false, error: "MISSING_SIGNATURE" };
+        const stripeSecretKey = await ctx.settings.get<string>("stripeSecretKey");
+        if (!stripeSecretKey) {
+          ctx.log.error("Webhook: stripeSecretKey not configured");
+          return { received: false, error: "NOT_CONFIGURED" };
         }
 
         const event = routeCtx.input as {
@@ -504,9 +489,36 @@ const plugin: SandboxedPlugin = {
         ctx.log.info("Stripe webhook received", { type: event.type });
 
         if (event.type === "checkout.session.completed") {
-          const session = event.data?.object ?? {};
-          const sessionId = session["id"];
+          const sessionId = (event.data?.object ?? {})["id"];
           if (typeof sessionId !== "string") return { received: true };
+
+          // Re-fetch the session directly from Stripe — do not trust the body.
+          const stripeRes = await fetch(
+            `https://api.stripe.com/v1/checkout/sessions/${encodeURIComponent(sessionId)}`,
+            {
+              headers: {
+                Authorization: `Bearer ${stripeSecretKey}`,
+              },
+            },
+          );
+
+          if (!stripeRes.ok) {
+            ctx.log.error("Webhook: failed to fetch session from Stripe", {
+              sessionId,
+              status: stripeRes.status,
+            });
+            return { received: false, error: "STRIPE_FETCH_FAILED" };
+          }
+
+          const session = (await stripeRes.json()) as Record<string, unknown>;
+
+          if (session["payment_status"] !== "paid") {
+            ctx.log.warn("Webhook: session not paid, ignoring", {
+              sessionId,
+              payment_status: session["payment_status"],
+            });
+            return { received: true };
+          }
 
           const result = await ctx.storage.orders.query({
             where: { stripeSessionId: sessionId },
@@ -516,6 +528,35 @@ const plugin: SandboxedPlugin = {
           if (result.items.length > 0) {
             const order = result.items[0];
             const existing = order.data as Record<string, unknown>;
+
+            // Idempotency: skip if already paid.
+            if (existing.status === "paid") {
+              ctx.log.info("Webhook: order already paid, skipping", { orderId: order.id });
+              return { received: true };
+            }
+
+            // Verify amount and currency match the stored order.
+            const stripeAmount = session["amount_total"];
+            const stripeCurrency = typeof session["currency"] === "string"
+              ? session["currency"].toLowerCase()
+              : null;
+            const storedAmount = existing.totalAmount;
+            const storedCurrency = typeof existing.currency === "string"
+              ? existing.currency.toLowerCase()
+              : "usd";
+
+            if (stripeAmount !== storedAmount || stripeCurrency !== storedCurrency) {
+              ctx.log.error("Webhook: amount/currency mismatch", {
+                sessionId,
+                stripeAmount,
+                storedAmount,
+                stripeCurrency,
+                storedCurrency,
+              });
+              return { received: false, error: "AMOUNT_MISMATCH" };
+            }
+
+            // Pull customer email from Stripe's response, not the request body.
             const customerDetails = session["customer_details"] as
               | Record<string, unknown>
               | undefined;

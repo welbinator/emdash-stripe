@@ -76,19 +76,19 @@ describe("checkout route", () => {
 // webhook route
 // ---------------------------------------------------------------------------
 describe("webhook route", () => {
-	it("returns INVALID_EVENT when event type is missing (runtime host)", async () => {
+	it("returns NOT_CONFIGURED when stripeSecretKey is missing (runtime host)", async () => {
 		host = await createPluginRuntimeTestHost();
 		const result = await host.transport.invokeRoute("webhook", { data: {} });
-		expect(result).toMatchObject({ received: false, error: "INVALID_EVENT" });
+		expect(result).toMatchObject({ received: false, error: "NOT_CONFIGURED" });
 	});
 
-	it("acknowledges an unknown event type when no webhook secret is configured (runtime host)", async () => {
+	it("returns NOT_CONFIGURED when stripeSecretKey is missing, even with valid event (runtime host)", async () => {
 		host = await createPluginRuntimeTestHost();
 		const result = await host.transport.invokeRoute("webhook", {
 			type: "some.unknown.event",
 			data: { object: {} },
 		});
-		expect(result).toMatchObject({ received: true });
+		expect(result).toMatchObject({ received: false, error: "NOT_CONFIGURED" });
 	});
 });
 
